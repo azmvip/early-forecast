@@ -1,0 +1,67 @@
+name: التوقع المبكر
+on:
+  schedule:
+    - cron: "10 */6 * * *"   # كل 6 ساعات (UTC)
+  workflow_dispatch:          # تشغيل يدوي من التطبيق
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: forecast
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: استرجاع السجل السابق
+        run: |
+          git fetch -q --depth=1 origin data && git show FETCH_HEAD:weather_log.csv.gz | gunzip > weather_log.csv || echo "أول تشغيل"
+
+      - name: بناء التوقع
+        run: |
+          mkdir -p site
+          python early_forecast.py --csv weather_log.csv --manual my_station.csv --out site/index.html
+
+      - name: حفظ السجل (فرع data بلا تاريخ متراكم)
+        run: |
+          D=$(mktemp -d)
+          gzip -c weather_log.csv > "$D/weather_log.csv.gz"
+          cd "$D"
+          git init -q -b data
+          git config user.name forecast-bot
+          git config user.email bot@users.noreply.github.com
+          git add weather_log.csv.gz
+          git commit -qm "data"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
+
+      - name: نشر على Cloudflare Pages (يعمل فقط إن أضفت الأسرار)
+        if: ${{ env.CLOUDFLARE_API_TOKEN != '' }}
+        run: |
+          npx --yes wrangler@3 pages project create early-forecast --production-branch=main || true
+          npx --yes wrangler@3 pages deploy site --project-name=early-forecast --branch=main
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:               # احذف هذه الوظيفة كلها إن أردت Cloudflare فقط
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.dep.outputs.page_url }}
+    steps:
+      - id: dep
+        uses: actions/deploy-pages@v4
